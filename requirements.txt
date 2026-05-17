@@ -1,0 +1,13 @@
+# recon-platform — Python dependencies
+# External tool binaries (subfinder, httpx) are expected to be on PATH.
+# This project has intentionally minimal Python dependencies to remain
+# portable and easy to install in restricted environments.
+
+# No third-party Python packages are required for the core framework.
+# Add extras below as needed for plugins or private_modules.
+
+# Optional: rich console output (uncomment if desired)
+# rich>=13.0
+
+# Optional: dotenv support for settings overrides
+# python-dotenv>=1.0

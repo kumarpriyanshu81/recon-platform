@@ -1,0 +1,44 @@
+# --- Private / proprietary content ---
+private_modules/*
+!private_modules/.gitkeep
+
+# --- Scan output ---
+output/*
+!output/.gitkeep
+
+# --- Environment & secrets ---
+.env
+.env.*
+secrets.yaml
+secrets.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+
+# --- Tools cache ---
+.subfinder/
+.httpx/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
