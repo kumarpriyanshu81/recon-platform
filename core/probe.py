@@ -135,25 +135,23 @@ class HTTPProber:
         host_input = "\n".join(self.hosts)
         cmd = self._build_command()
 
-        # Cap total timeout: threads run in parallel, so wall-time is roughly
-        # (hosts / threads) * per-request-timeout, plus generous headroom.
-        wall_time = max(
-            300,
-            (len(self.hosts) // max(self.threads, 1)) * self.timeout + 120,
-        )
         log.info("Probing %d hosts with httpx ...", len(self.hosts))
         try:
+            # No subprocess-level timeout — httpx manages per-request timeouts
+            # via the -timeout flag. Killing the process early loses all results.
             result = run_command(
                 cmd,
                 stdin_input=host_input,
-                timeout=wall_time,
+                timeout=None,
             )
         except Exception as exc:  # noqa: BLE001
             log.error("httpx failed: %s", exc)
             return []
 
-        if result.returncode != 0 and result.stderr:
+        if result.stderr:
             log.warning("httpx stderr: %s", result.stderr.strip()[:500])
+        if result.returncode != 0:
+            log.warning("httpx exited with code %d", result.returncode)
 
         parsed = self._parse_output(result.stdout)
         log.info("Received %d live host results.", len(parsed))
@@ -169,16 +167,15 @@ class HTTPProber:
     # ------------------------------------------------------------------
 
     def _build_command(self) -> list[str]:
-        # Hosts are piped via stdin — no -l flag needed.
-        # Flags use the short-form aliases that are stable across httpx versions.
+        # Hosts are piped via stdin — no file/URL argument needed.
+        # Only flags confirmed to work across httpx-toolkit / standard httpx builds.
+        # content-length and webserver are included in JSON output by default.
         cmd = [
             self._binary,
             "-json",
             "-title",
-            "-td",              # -tech-detect
-            "-sc",              # -status-code
-            "-cl",              # -content-length
-            "-ws",              # -web-server
+            "-sc",              # status-code
+            "-td",              # tech-detect
             "-timeout", str(self.timeout),
             "-t", str(self.threads),
             "-rl", str(self.rate_limit),
