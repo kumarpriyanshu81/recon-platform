@@ -1,21 +1,20 @@
 """
 recon-platform — modular reconnaissance orchestration framework.
 
-Entry point.  Orchestrates the full pipeline:
-  1.  Parse CLI arguments
-  2.  Load plugins (public + private)
-  3.  Enumerate subdomains
-  4.  Probe live hosts
-  5.  Categorise findings
-  6.  Write output files
-  7.  Fire post-output hooks & print summary
+Pipeline stages:
+  [ENUM]   Subdomain enumeration via subfinder
+  [PROBE]  HTTP probing via httpx-toolkit (chunked, with retry pass)
+  [FILTER] Categorisation + priority scoring
+  [OUTPUT] Structured file output + JSON report
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 from config import settings
@@ -24,7 +23,7 @@ from core.logger import configure_root_logger, get_logger
 from core.output import OutputWriter
 from core.probe import HTTPProber
 from core.subdomains import SubdomainEnumerator
-from core.utils import sanitise_domain
+from core.utils import ensure_dir, sanitise_domain
 from plugins.loader import PluginLoader, PluginRegistry
 
 BANNER = """
@@ -34,6 +33,48 @@ BANNER = """
   +-------------------------------------------------+
 """
 
+_STATE_PREFIX = ".state_"
+
+
+# ---------------------------------------------------------------------------
+# Resumable scan state
+# ---------------------------------------------------------------------------
+
+def _state_path(domain: str, output_dir: Path) -> Path:
+    return output_dir / f"{_STATE_PREFIX}{domain}.json"
+
+
+def _save_state(domain: str, subdomains: list[str], output_dir: Path) -> None:
+    """Persist subdomain list so a scan can be resumed after interruption."""
+    path = _state_path(domain, output_dir)
+    path.write_text(
+        json.dumps({"domain": domain, "subdomains": subdomains}, indent=2),
+        encoding="utf-8",
+    )
+    get_logger(__name__).debug("[ENUM] State saved -> %s", path)
+
+
+def _load_state(domain: str, output_dir: Path) -> list[str] | None:
+    """Load a previously saved subdomain list. Returns None if absent or corrupt."""
+    path = _state_path(domain, output_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        subdomains = data.get("subdomains")
+        if not isinstance(subdomains, list):
+            raise ValueError("'subdomains' key missing or not a list")
+        return subdomains
+    except (json.JSONDecodeError, ValueError) as exc:
+        get_logger(__name__).warning(
+            "[ENUM] State file corrupt (%s) — running full enumeration.", exc
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -42,14 +83,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=textwrap.dedent("""\
             Modular reconnaissance orchestration framework.
 
-            Runs a full passive recon pipeline:
-              subfinder -> httpx -> categorisation -> structured output
+            Pipeline:
+              [ENUM] subfinder -> [PROBE] httpx-toolkit -> [FILTER] categorise -> [OUTPUT] files
         """),
         epilog=textwrap.dedent("""\
             Examples:
               python main.py -d example.com
-              python main.py -d example.com --output-dir ./runs/example
-              python main.py -d example.com --skip-probe --verbose
+              python main.py -d example.com --output-dir ./runs/2024-05-01
+              python main.py -d example.com --resume
+              python main.py -d example.com --subdomains-file subs.txt
+              python main.py -d example.com --chunk-size 250 --httpx-args "-t 100"
         """),
     )
 
@@ -72,9 +115,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Pipeline control
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reload subdomains from last saved state, skip re-enumeration",
+    )
+    parser.add_argument(
         "--skip-enum",
         action="store_true",
-        help="Skip subdomain enumeration (requires --subdomains-file)",
+        help="Skip subfinder (requires --subdomains-file)",
     )
     parser.add_argument(
         "--subdomains-file",
@@ -86,29 +134,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-probe",
         action="store_true",
-        help="Skip HTTP probing (only run enumeration)",
+        help="Enumeration only — skip HTTP probing",
     )
     parser.add_argument(
         "--no-plugins",
         action="store_true",
-        help="Disable plugin loading",
+        help="Disable all plugin loading",
     )
 
-    # Tool overrides
+    # Probing
+    parser.add_argument(
+        "--chunk-size",
+        metavar="N",
+        type=int,
+        default=None,
+        help=f"Hosts per httpx batch (default: {settings.HTTPX_CHUNK_SIZE})",
+    )
+
+    # Tool pass-through
     parser.add_argument(
         "--subfinder-args",
         metavar="ARGS",
         default="",
-        help="Additional arguments passed directly to subfinder",
+        help="Extra arguments forwarded verbatim to subfinder",
     )
     parser.add_argument(
         "--httpx-args",
         metavar="ARGS",
         default="",
-        help="Additional arguments passed directly to httpx",
+        help="Extra arguments forwarded verbatim to httpx-toolkit",
     )
 
-    # Logging
+    # Verbosity
     parser.add_argument(
         "-v", "--verbose",
         action="store_true",
@@ -118,42 +175,63 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_plugins(registry: PluginRegistry) -> None:
-    loader = PluginLoader(registry)
-    public_count = loader.load_directory(settings.PLUGINS_DIR)
-    private_count = loader.load_directory(settings.PRIVATE_MODULES_DIR)
-    log = get_logger(__name__)
-    log.info(
-        "Plugins loaded: %d public, %d private.",
-        public_count, private_count,
+# ---------------------------------------------------------------------------
+# Plugin bootstrap
+# ---------------------------------------------------------------------------
+
+def _load_plugins(registry: PluginRegistry) -> None:
+    loader   = PluginLoader(registry)
+    public   = loader.load_directory(settings.PLUGINS_DIR)
+    private  = loader.load_directory(settings.PRIVATE_MODULES_DIR)
+    get_logger(__name__).info(
+        "Plugins: %d public, %d private loaded.", public, private
     )
 
 
-def load_subdomains_from_file(path: Path) -> list[str]:
+# ---------------------------------------------------------------------------
+# Subdomain file loader
+# ---------------------------------------------------------------------------
+
+def _load_subdomains_from_file(path: Path) -> list[str]:
     if not path.exists():
         raise FileNotFoundError(f"Subdomains file not found: {path}")
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return [l.strip() for l in lines if l.strip()]
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
-def print_summary(domain: str, subdomains: list, results: list, written: dict) -> None:
-    log = get_logger(__name__)
-    sep = "-" * 56
+# ---------------------------------------------------------------------------
+# Console summary
+# ---------------------------------------------------------------------------
+
+def _print_summary(
+    domain: str,
+    subdomains: list,
+    results: list,
+    written: dict,
+    elapsed: float,
+) -> None:
+    live_rate = (len(results) / len(subdomains) * 100) if subdomains else 0.0
+    minutes, seconds = divmod(int(elapsed), 60)
+    duration = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+
+    high   = sum(1 for r in results if r.score == settings.SCORE_HIGH)
+    medium = sum(1 for r in results if r.score == settings.SCORE_MEDIUM)
+    low    = sum(1 for r in results if r.score == settings.SCORE_LOW)
+
+    sep = "-" * 62
     print(f"\n{sep}")
-    print(f"  SCAN SUMMARY  {domain}")
+    print(f"  SCAN COMPLETE  {domain}")
     print(sep)
+    print(f"  Duration              : {duration}")
     print(f"  Subdomains discovered : {len(subdomains)}")
-    print(f"  Live hosts            : {len(results)}")
-
-    login  = sum(1 for r in results if r.is_login)
-    admin  = sum(1 for r in results if r.is_admin)
-    api    = sum(1 for r in results if r.is_api)
-    stag   = sum(1 for r in results if r.is_staging)
-
-    print(f"  Login pages           : {login}")
-    print(f"  Admin panels          : {admin}")
-    print(f"  API endpoints         : {api}")
-    print(f"  Staging environments  : {stag}")
+    print(f"  Live hosts            : {len(results)}  ({live_rate:.1f}% live rate)")
+    print(f"  Interesting findings  : {high + medium + low}")
+    print(f"    HIGH                : {high}")
+    print(f"    MEDIUM              : {medium}")
+    print(f"    LOW                 : {low}")
     print(sep)
     print("  Output files:")
     for label, path in written.items():
@@ -161,89 +239,95 @@ def print_summary(domain: str, subdomains: list, results: list, written: dict) -
     print(f"{sep}\n")
 
 
-def run(args: argparse.Namespace) -> int:
-    log = get_logger(__name__)
-    domain = sanitise_domain(args.domain)
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
 
-    # ------------------------------------------------------------------
-    # Plugin bootstrap
-    # ------------------------------------------------------------------
+def run(args: argparse.Namespace) -> int:
+    log        = get_logger(__name__)
+    start_time = time.monotonic()
+    domain     = sanitise_domain(args.domain)
+    output_dir = ensure_dir(args.output_dir or settings.OUTPUT_DIR)
+
+    # --- Plugins ---
     registry = PluginRegistry()
     if not args.no_plugins:
-        load_plugins(registry)
+        _load_plugins(registry)
 
-    # ------------------------------------------------------------------
-    # Subdomain enumeration
-    # ------------------------------------------------------------------
+    # --- [ENUM] Subdomain enumeration ---
     subdomains: list[str] = []
-
     registry.fire("pre_enum", domain)
 
-    if args.subdomains_file:
-        log.info("Loading subdomains from %s …", args.subdomains_file)
-        try:
-            subdomains = load_subdomains_from_file(args.subdomains_file)
-        except FileNotFoundError as exc:
-            log.error("%s", exc)
-            return 1
-    elif not args.skip_enum:
-        extra = args.subfinder_args.split() if args.subfinder_args else []
-        enumerator = SubdomainEnumerator(domain, extra_args=extra)
-        subdomains = enumerator.run()
-    else:
-        log.warning("--skip-enum set without --subdomains-file; no hosts to probe.")
+    if args.resume:
+        saved = _load_state(domain, output_dir)
+        if saved:
+            subdomains = saved
+            log.info("[ENUM] Resumed: %d subdomains from saved state.", len(subdomains))
+        else:
+            log.warning("[ENUM] No saved state for '%s' — running full enumeration.", domain)
+
+    if not subdomains:
+        if args.subdomains_file:
+            log.info("[ENUM] Loading from file: %s", args.subdomains_file)
+            try:
+                subdomains = _load_subdomains_from_file(args.subdomains_file)
+            except FileNotFoundError as exc:
+                log.error("[ENUM] %s", exc)
+                return 1
+        elif not args.skip_enum:
+            extra = args.subfinder_args.split() if args.subfinder_args else []
+            subdomains = SubdomainEnumerator(domain, extra_args=extra).run()
+        else:
+            log.warning("[ENUM] --skip-enum set without --subdomains-file.")
 
     registry.fire("post_enum", domain, subdomains)
 
     if not subdomains:
-        log.warning("No subdomains found. The pipeline will continue with an empty list.")
+        log.warning("[ENUM] No subdomains found — probe stage will be skipped.")
+    else:
+        _save_state(domain, subdomains, output_dir)
 
-    # ------------------------------------------------------------------
-    # HTTP probing
-    # ------------------------------------------------------------------
-    results = []
+    # --- [PROBE] HTTP probing ---
+    results: list = []
 
     if not args.skip_probe and subdomains:
         registry.fire("pre_probe", subdomains)
 
+        chunk_size  = args.chunk_size or settings.HTTPX_CHUNK_SIZE
         extra_httpx = args.httpx_args.split() if args.httpx_args else []
-        prober = HTTPProber(subdomains, extra_args=extra_httpx)
+
+        prober  = HTTPProber(subdomains, chunk_size=chunk_size, extra_args=extra_httpx)
         results = prober.run()
 
         registry.fire("post_probe", results)
+    elif args.skip_probe:
+        log.info("[PROBE] Skipped (--skip-probe).")
 
-    # ------------------------------------------------------------------
-    # Categorisation
-    # ------------------------------------------------------------------
+    # --- [FILTER] Categorisation + scoring ---
     if results:
-        rf = ResultFilter()
-        rf.apply(results)
+        log.info("[FILTER] Classifying %d hosts ...", len(results))
+        ResultFilter().apply(results)
         registry.fire("post_filter", results)
+    else:
+        log.info("[FILTER] No results to classify.")
 
-    # ------------------------------------------------------------------
-    # Output
-    # ------------------------------------------------------------------
-    writer = OutputWriter(domain, output_dir=args.output_dir)
-    written = writer.write_all(subdomains, results)
+    # --- [OUTPUT] Write files ---
+    elapsed = time.monotonic() - start_time
+    writer  = OutputWriter(domain, output_dir=output_dir)
+    written = writer.write_all(subdomains, results, duration_seconds=elapsed)
 
     registry.fire("post_output", written)
 
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
-    print_summary(domain, subdomains, results, written)
+    _print_summary(domain, subdomains, results, written, elapsed)
     return 0
 
 
 def main() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args()
+    args   = parser.parse_args()
 
-    log_level = "DEBUG" if args.verbose else settings.LOG_LEVEL
-    configure_root_logger(log_level)
-
+    configure_root_logger("DEBUG" if args.verbose else settings.LOG_LEVEL)
     print(BANNER)
-
     sys.exit(run(args))
 
 

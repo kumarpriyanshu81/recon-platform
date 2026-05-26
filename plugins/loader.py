@@ -1,25 +1,53 @@
 """
-Dynamic plugin loader.
+Dynamic plugin loader — public and private plugin support.
 
-Discovers and loads plugin modules from two locations:
-  1. plugins/         — public plugins committed to the repository.
-  2. private_modules/ — proprietary plugins excluded from version control.
+============================================================
+Public vs Private Plugin Model
+============================================================
 
-Plugins must define a top-level `register(registry: PluginRegistry)` function
-that attaches hooks to the provided registry.  This keeps the public loader
-interface stable while allowing private plugins to hook into any pipeline stage.
+PUBLIC plugins  →  plugins/
+    - Committed to version control
+    - Generic, reusable, shareable
+    - Must contain no proprietary methodology
 
-Example plugin skeleton::
+PRIVATE plugins →  private_modules/
+    - Excluded from version control (.gitignore)
+    - Proprietary detection logic, custom scoring, internal workflows
+    - Loaded at runtime exactly like public plugins — no config required
+    - Drop any .py file into private_modules/ and it is picked up automatically
 
-    # plugins/my_plugin.py
+Both directories are scanned in order. Private plugins load after public
+ones, so they can safely override or augment public behaviour.
+
+============================================================
+Plugin Contract
+============================================================
+
+Every plugin file must expose a top-level `register(registry)` function
+that attaches hooks to the provided PluginRegistry.
+
+    # my_plugin.py
     from plugins.loader import PluginRegistry
 
     def register(registry: PluginRegistry) -> None:
-        registry.on("post_probe", my_hook)
+        registry.on("post_probe", _my_hook)
 
-    def my_hook(results):
+    def _my_hook(results):
         ...
-        return results
+
+============================================================
+Supported Hook Events
+============================================================
+
+    pre_enum(domain: str)
+    post_enum(domain: str, subdomains: list[str])
+    pre_probe(hosts: list[str])
+    post_probe(results: list[HostResult])
+    post_filter(results: list[HostResult])
+    post_output(written_paths: dict[str, Path])
+
+Hooks are called in registration order. Return values are collected
+but not threaded back into the pipeline — plugins mutate in place.
 """
 
 from __future__ import annotations
@@ -40,22 +68,19 @@ HookFn = Callable[..., Any]
 
 class PluginRegistry:
     """
-    Central registry that plugins attach hooks to.
+    Central event bus that plugins register hooks against.
 
-    Supported hook events
-    ---------------------
-    pre_enum        Called before subdomain enumeration.   args: (domain,)
-    post_enum       Called after enumeration.              args: (domain, subdomains)
-    pre_probe       Called before HTTP probing.            args: (hosts,)
-    post_probe      Called after probing.                  args: (results,)
-    post_filter     Called after categorisation.           args: (results,)
-    post_output     Called after all files are written.    args: (written_paths,)
+    Plugins call `registry.on(event, fn)` inside their `register()` function.
+    The orchestrator calls `registry.fire(event, *args)` at each pipeline stage.
     """
 
     VALID_EVENTS = frozenset({
-        "pre_enum", "post_enum",
-        "pre_probe", "post_probe",
-        "post_filter", "post_output",
+        "pre_enum",
+        "post_enum",
+        "pre_probe",
+        "post_probe",
+        "post_filter",
+        "post_output",
     })
 
     def __init__(self) -> None:
@@ -70,7 +95,8 @@ class PluginRegistry:
         """Register *fn* as a hook for *event*."""
         if event not in self.VALID_EVENTS:
             raise ValueError(
-                f"Unknown event '{event}'. Valid events: {sorted(self.VALID_EVENTS)}"
+                f"Unknown event '{event}'. "
+                f"Valid events: {sorted(self.VALID_EVENTS)}"
             )
         self._hooks[event].append(fn)
         log.debug("Hook registered: event=%s fn=%s", event, fn.__qualname__)
@@ -81,17 +107,21 @@ class PluginRegistry:
 
     def fire(self, event: str, *args: Any, **kwargs: Any) -> list[Any]:
         """
-        Invoke all hooks registered for *event*.
-        Returns a list of return values from each hook.
+        Invoke all hooks registered for *event* in registration order.
+        Exceptions in individual hooks are caught and logged so one
+        failing plugin never aborts the pipeline.
         """
-        results = []
+        return_values = []
         for fn in self._hooks.get(event, []):
             try:
                 rv = fn(*args, **kwargs)
-                results.append(rv)
+                return_values.append(rv)
             except Exception as exc:  # noqa: BLE001
-                log.error("Hook %s raised an error: %s", fn.__qualname__, exc)
-        return results
+                log.error(
+                    "Hook %s raised an exception (event=%s): %s",
+                    fn.__qualname__, event, exc,
+                )
+        return return_values
 
     @property
     def loaded_plugins(self) -> list[str]:
@@ -100,10 +130,18 @@ class PluginRegistry:
 
 class PluginLoader:
     """
-    Discovers and loads plugin files from one or more directories.
+    Discovers and loads plugin modules from a directory.
 
-    Each Python file (except __init__.py and loader.py) is imported and
-    its `register(registry)` function is called if present.
+    Any .py file whose name does not start with '_' and is not 'loader.py'
+    is treated as a plugin candidate. The file is imported and its
+    `register(registry)` function is called if present.
+
+    Usage::
+
+        registry = PluginRegistry()
+        loader = PluginLoader(registry)
+        loader.load_directory(settings.PLUGINS_DIR)          # public
+        loader.load_directory(settings.PRIVATE_MODULES_DIR)  # private
     """
 
     def __init__(self, registry: PluginRegistry) -> None:
@@ -111,11 +149,12 @@ class PluginLoader:
 
     def load_directory(self, directory: Path) -> int:
         """
-        Load all plugins from *directory*.
-        Returns the number of successfully loaded plugins.
+        Load all plugins found in *directory*.
+        Returns the count of successfully registered plugins.
+        Missing directories are silently skipped.
         """
         if not directory.exists():
-            log.debug("Plugin directory does not exist, skipping: %s", directory)
+            log.debug("Plugin directory not found, skipping: %s", directory)
             return 0
 
         loaded = 0
@@ -126,7 +165,12 @@ class PluginLoader:
                 loaded += 1
         return loaded
 
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
     def _load_file(self, path: Path) -> bool:
+        """Import *path* as a module and call its register() function."""
         module_name = f"_plugin_{path.stem}"
         try:
             spec = importlib.util.spec_from_file_location(module_name, path)
@@ -138,15 +182,15 @@ class PluginLoader:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)  # type: ignore[attr-defined]
 
-            if hasattr(module, "register") and callable(module.register):
-                module.register(self.registry)
-                self.registry._loaded_plugins.append(path.name)
-                log.info("Loaded plugin: %s", path.name)
-            else:
+            if not (hasattr(module, "register") and callable(module.register)):
                 log.warning(
                     "Plugin %s has no register() function — skipped.", path.name
                 )
                 return False
+
+            module.register(self.registry)
+            self.registry._loaded_plugins.append(path.name)
+            log.info("Loaded plugin: %s", path.name)
 
         except Exception as exc:  # noqa: BLE001
             log.error("Failed to load plugin %s: %s", path.name, exc)

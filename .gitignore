@@ -2,6 +2,10 @@
 private_modules/*
 !private_modules/.gitkeep
 
+# --- Private documentation (internal methodology, not for public repo) ---
+# Public docs (architecture diagrams, etc.) can be added with explicit negations.
+docs/PRIVATE_NOTES.md
+
 # --- Scan output ---
 output/*
 !output/.gitkeep

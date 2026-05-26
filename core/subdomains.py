@@ -1,11 +1,13 @@
 """
 Subdomain enumeration via subfinder.
 
-Keeps all subprocess invocation details isolated here so the rest of
-the framework never needs to know which external tool is used.
+Isolates all subprocess invocation details so the rest of the
+framework has no dependency on which enumeration tool is used.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
+import subprocess
 from typing import Optional
 
 from config import settings
@@ -18,6 +20,9 @@ log = get_logger(__name__)
 class SubdomainEnumerator:
     """
     Wraps subfinder to enumerate subdomains for a given target domain.
+
+    Returns a deduplicated list of hostnames. Never raises — callers
+    receive an empty list on any failure so the pipeline can continue.
 
     Usage::
 
@@ -33,9 +38,9 @@ class SubdomainEnumerator:
         threads: int = settings.SUBFINDER_THREADS,
         extra_args: Optional[list[str]] = None,
     ) -> None:
-        self.domain = domain
-        self.timeout = timeout
-        self.threads = threads
+        self.domain     = domain
+        self.timeout    = timeout
+        self.threads    = threads
         self.extra_args: list[str] = extra_args or []
         self._binary: Optional[str] = None
 
@@ -46,30 +51,39 @@ class SubdomainEnumerator:
     def run(self) -> list[str]:
         """
         Execute subfinder and return a deduplicated list of subdomains.
-
-        Returns an empty list (never raises) so callers can continue the
-        pipeline even when subfinder is not installed or finds nothing.
+        Returns [] on tool-not-found, timeout, or execution error.
         """
         try:
             self._binary = require_tool(settings.SUBFINDER_BIN)
         except FileNotFoundError as exc:
-            log.error("%s", exc)
+            log.error("[ENUM] %s", exc)
             return []
 
         cmd = self._build_command()
-        log.info("Running subfinder against %s …", self.domain)
+        log.info("[ENUM] Running subfinder against %s ...", self.domain)
 
         try:
             result = run_command(cmd, timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            log.error(
+                "[ENUM] subfinder timed out after %ds for %s",
+                self.timeout, self.domain,
+            )
+            return []
         except Exception as exc:  # noqa: BLE001
-            log.error("subfinder failed: %s", exc)
+            log.error("[ENUM] subfinder failed: %s", exc)
             return []
 
-        if result.returncode != 0 and result.stderr:
-            log.warning("subfinder stderr: %s", result.stderr.strip())
+        # Log stderr regardless of exit code — subfinder writes API
+        # key warnings and rate-limit notices to stderr at exit 0.
+        if result.stderr:
+            log.debug("[ENUM] subfinder stderr: %s", result.stderr.strip()[:500])
+        if result.returncode not in (0, 1):
+            # Exit 1 from subfinder often means "no results", not a crash
+            log.warning("[ENUM] subfinder exited with code %d", result.returncode)
 
         subdomains = self._parse_output(result.stdout)
-        log.info("Found %d unique subdomains.", len(subdomains))
+        log.info("[ENUM] Found %d unique subdomains for %s.", len(subdomains), self.domain)
         return subdomains
 
     # ------------------------------------------------------------------
@@ -88,6 +102,6 @@ class SubdomainEnumerator:
 
     @staticmethod
     def _parse_output(raw: str) -> list[str]:
-        """Split stdout into a clean, deduplicated list of hostnames."""
+        """Split stdout into a clean, deduplicated, lowercased list of hostnames."""
         lines = [line.strip().lower() for line in raw.splitlines()]
-        return deduplicate([l for l in lines if l])
+        return deduplicate([line for line in lines if line])

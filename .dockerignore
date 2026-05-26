@@ -1,0 +1,13 @@
+.git
+.gitignore
+output/
+private_modules/
+docs/PRIVATE_NOTES.md
+.env
+.env.*
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.md
+tests/
