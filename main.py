@@ -142,6 +142,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable all plugin loading",
     )
 
+    # Enumeration
+    parser.add_argument(
+        "--enum-timeout",
+        metavar="SEC",
+        type=int,
+        default=None,
+        help=(
+            f"subfinder wall-clock timeout in seconds "
+            f"(default: {settings.SUBFINDER_TIMEOUT}). "
+            f"On timeout, partial results collected before the cutoff are "
+            f"preserved and the pipeline continues."
+        ),
+    )
+
     # Probing
     parser.add_argument(
         "--chunk-size",
@@ -275,8 +289,11 @@ def run(args: argparse.Namespace) -> int:
                 log.error("[ENUM] %s", exc)
                 return 1
         elif not args.skip_enum:
-            extra = args.subfinder_args.split() if args.subfinder_args else []
-            subdomains = SubdomainEnumerator(domain, extra_args=extra).run()
+            extra        = args.subfinder_args.split() if args.subfinder_args else []
+            enum_timeout = args.enum_timeout or settings.SUBFINDER_TIMEOUT
+            subdomains   = SubdomainEnumerator(
+                domain, timeout=enum_timeout, extra_args=extra
+            ).run()
         else:
             log.warning("[ENUM] --skip-enum set without --subdomains-file.")
 

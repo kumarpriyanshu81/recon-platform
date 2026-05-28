@@ -51,7 +51,11 @@ class SubdomainEnumerator:
     def run(self) -> list[str]:
         """
         Execute subfinder and return a deduplicated list of subdomains.
-        Returns [] on tool-not-found, timeout, or execution error.
+
+        On timeout, partial stdout collected before the cutoff is parsed
+        and returned so the rest of the pipeline can continue with whatever
+        was discovered.  Returns [] only when the tool is not found or
+        produces no output at all.
         """
         try:
             self._binary = require_tool(settings.SUBFINDER_BIN)
@@ -60,31 +64,65 @@ class SubdomainEnumerator:
             return []
 
         cmd = self._build_command()
-        log.info("[ENUM] Running subfinder against %s ...", self.domain)
+        log.info(
+            "[ENUM] Running subfinder against %s (timeout=%ds) ...",
+            self.domain, self.timeout,
+        )
 
         try:
             result = run_command(cmd, timeout=self.timeout)
-        except subprocess.TimeoutExpired:
-            log.error(
-                "[ENUM] subfinder timed out after %ds for %s",
-                self.timeout, self.domain,
-            )
-            return []
+        except subprocess.TimeoutExpired as exc:
+            return self._handle_timeout(exc)
         except Exception as exc:  # noqa: BLE001
             log.error("[ENUM] subfinder failed: %s", exc)
             return []
 
-        # Log stderr regardless of exit code — subfinder writes API
-        # key warnings and rate-limit notices to stderr at exit 0.
+        # Log stderr at DEBUG — subfinder emits API key warnings and
+        # rate-limit notices at exit 0, which are noise at INFO level.
         if result.stderr:
             log.debug("[ENUM] subfinder stderr: %s", result.stderr.strip()[:500])
         if result.returncode not in (0, 1):
-            # Exit 1 from subfinder often means "no results", not a crash
+            # Exit 1 often means "no results found", not a crash.
             log.warning("[ENUM] subfinder exited with code %d", result.returncode)
 
         subdomains = self._parse_output(result.stdout)
         log.info("[ENUM] Found %d unique subdomains for %s.", len(subdomains), self.domain)
         return subdomains
+
+    def _handle_timeout(self, exc: subprocess.TimeoutExpired) -> list[str]:
+        """
+        Recover partial results from a timed-out subfinder run.
+
+        Python's subprocess.run() kills the process on timeout and then
+        drains remaining pipe buffers back into exc.stdout (as bytes,
+        regardless of the text=True setting).  Decoding and parsing that
+        buffer gives us everything subfinder had already written.
+        """
+        partial_raw = ""
+        if exc.stdout:
+            # exc.stdout is always bytes here — decode with replacement so
+            # a single bad byte never discards the entire partial output.
+            if isinstance(exc.stdout, bytes):
+                partial_raw = exc.stdout.decode("utf-8", errors="replace")
+            else:
+                partial_raw = exc.stdout
+
+        partial = self._parse_output(partial_raw)
+
+        if partial:
+            log.warning(
+                "[ENUM] subfinder timed out after %ds — "
+                "returning %d partial results for %s. "
+                "Use --enum-timeout to extend the limit.",
+                self.timeout, len(partial), self.domain,
+            )
+        else:
+            log.error(
+                "[ENUM] subfinder timed out after %ds with no output for %s.",
+                self.timeout, self.domain,
+            )
+
+        return partial
 
     # ------------------------------------------------------------------
     # Internals

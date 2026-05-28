@@ -45,7 +45,7 @@ HTTPX_BIN: str     = _resolve_httpx_bin()
 # ---------------------------------------------------------------------------
 # Subfinder
 # ---------------------------------------------------------------------------
-SUBFINDER_TIMEOUT: int = int(os.getenv("SUBFINDER_TIMEOUT", "120"))  # seconds
+SUBFINDER_TIMEOUT: int = int(os.getenv("SUBFINDER_TIMEOUT", "300"))  # seconds
 SUBFINDER_THREADS: int = int(os.getenv("SUBFINDER_THREADS", "10"))
 
 # ---------------------------------------------------------------------------
