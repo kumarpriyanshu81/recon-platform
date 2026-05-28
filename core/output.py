@@ -184,7 +184,7 @@ class OutputWriter:
                 subdomains, results, duration_seconds=duration_seconds
             ),
         }
-        log.info("[OUTPUT] All files written to %s", self.output_dir)
+        log.info("[OUTPUT] Reports written to %s", self.output_dir)
         return written
 
     # ------------------------------------------------------------------
@@ -197,5 +197,5 @@ class OutputWriter:
             "\n".join(lines) + ("\n" if lines else ""),
             encoding="utf-8",
         )
-        log.info("[OUTPUT] %-18s %d entries", filename, len(lines))
+        log.debug("[OUTPUT] %-18s %d entries", filename, len(lines))
         return path

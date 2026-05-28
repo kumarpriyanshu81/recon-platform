@@ -182,18 +182,16 @@ class HTTPProber:
         all_results: list[HostResult] = []
 
         log.info(
-            "[PROBE] %d hosts | %d chunk(s) | chunk=%d threads=%d rate=%d/s timeout=%ds",
-            len(self.hosts), total_chunks,
-            self.chunk_size, self.threads, self.rate_limit, self.timeout,
+            "[PROBE] Probing %d hosts — %d chunk(s), %d threads, %d/s rate limit",
+            len(self.hosts), total_chunks, self.threads, self.rate_limit,
         )
 
         for idx, chunk in enumerate(chunks, 1):
-            log.info("[PROBE] Chunk %d/%d — %d hosts ...", idx, total_chunks, len(chunk))
             chunk_results = self._probe_chunk(chunk, self.timeout)
             all_results.extend(chunk_results)
             log.info(
-                "[PROBE] Chunk %d/%d done — %d/%d responded.",
-                idx, total_chunks, len(chunk_results), len(chunk),
+                "[PROBE] Chunk %d/%d complete (%d responsive)",
+                idx, total_chunks, len(chunk_results),
             )
 
         # --- Retry pass ---
@@ -201,13 +199,10 @@ class HTTPProber:
             unprobed = self._find_unprobed(all_results)
             if unprobed:
                 retry_timeout = self.timeout * 2
-                log.info(
-                    "[PROBE] Retry: %d hosts with no response — timeout %ds ...",
-                    len(unprobed), retry_timeout,
-                )
+                log.info("[PROBE] Retrying %d unresolved hosts ...", len(unprobed))
                 retry_results = self._probe_chunk(unprobed, retry_timeout)
                 all_results.extend(retry_results)
-                log.info("[PROBE] Retry done — %d additional results.", len(retry_results))
+                log.info("[PROBE] Retry recovered %d additional live hosts.", len(retry_results))
 
         # --- Deduplicate by URL (guards against retry overlap) ---
         all_results = self._deduplicate(all_results)

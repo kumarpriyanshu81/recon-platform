@@ -231,25 +231,34 @@ def _print_summary(
     minutes, seconds = divmod(int(elapsed), 60)
     duration = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
 
-    high   = sum(1 for r in results if r.score == settings.SCORE_HIGH)
-    medium = sum(1 for r in results if r.score == settings.SCORE_MEDIUM)
-    low    = sum(1 for r in results if r.score == settings.SCORE_LOW)
+    high    = sum(1 for r in results if r.score == settings.SCORE_HIGH)
+    medium  = sum(1 for r in results if r.score == settings.SCORE_MEDIUM)
+    low     = sum(1 for r in results if r.score == settings.SCORE_LOW)
+    logins  = sum(1 for r in results if r.is_login)
+    admins  = sum(1 for r in results if r.is_admin)
+    apis    = sum(1 for r in results if r.is_api)
+    staging = sum(1 for r in results if r.is_staging)
 
-    sep = "-" * 62
+    sep = "-" * 56
     print(f"\n{sep}")
-    print(f"  SCAN COMPLETE  {domain}")
+    print(f"  SCAN SUMMARY  {domain}")
     print(sep)
     print(f"  Duration              : {duration}")
     print(f"  Subdomains discovered : {len(subdomains)}")
-    print(f"  Live hosts            : {len(results)}  ({live_rate:.1f}% live rate)")
-    print(f"  Interesting findings  : {high + medium + low}")
-    print(f"    HIGH                : {high}")
-    print(f"    MEDIUM              : {medium}")
-    print(f"    LOW                 : {low}")
-    print(sep)
-    print("  Output files:")
-    for label, path in written.items():
-        print(f"    {label:<18} -> {path}")
+    print(f"  Live hosts            : {len(results)}  ({live_rate:.1f}%)")
+    print(f"  Login pages           : {logins}")
+    print(f"  Admin panels          : {admins}")
+    print(f"  API endpoints         : {apis}")
+    print(f"  Staging environments  : {staging}")
+    if high or medium or low:
+        print(sep)
+        print(f"  Risk Summary:")
+        print(f"    HIGH   : {high}")
+        print(f"    MEDIUM : {medium}")
+        print(f"    LOW    : {low}")
+    if "results_json" in written:
+        print(sep)
+        print(f"  Report -> {written['results_json']}")
     print(f"{sep}\n")
 
 
