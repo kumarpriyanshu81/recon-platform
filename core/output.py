@@ -163,6 +163,52 @@ class OutputWriter:
         log.info("[OUTPUT] JSON report -> %s", path)
         return path
 
+    def write_priority(self, results: list[HostResult], score: str) -> Path:
+        """
+        Write a priority-tier file (HIGH / MEDIUM / LOW).
+
+        Each entry is formatted as a readable block:
+            [HIGH] https://example.com
+            score: HIGH
+            tags:  admin, login
+
+        Entries are sorted by number of matched category flags (most
+        specific first), then alphabetically by URL within the same count.
+        """
+        _flag_tags = [
+            ("is_admin",     "admin"),
+            ("is_login",     "login"),
+            ("is_api",       "api"),
+            ("is_dashboard", "dashboard"),
+            ("is_staging",   "staging"),
+        ]
+
+        tier = [r for r in results if r.score == score]
+        tier.sort(
+            key=lambda r: (
+                -sum(getattr(r, attr) for attr, _ in _flag_tags),
+                r.url,
+            )
+        )
+
+        blocks: list[str] = []
+        for r in tier:
+            tags = [label for attr, label in _flag_tags if getattr(r, attr)]
+            blocks.append(
+                f"[{r.score}] {r.url}\n"
+                f"score: {r.score}\n"
+                f"tags:  {', '.join(tags) if tags else '—'}"
+            )
+
+        filename = settings.OUTPUT_FILES[f"{score.lower()}_priority"]
+        path = self.output_dir / filename
+        path.write_text(
+            "\n\n".join(blocks) + ("\n" if blocks else ""),
+            encoding="utf-8",
+        )
+        log.debug("[OUTPUT] %-18s %d entries", filename, len(tier))
+        return path
+
     def write_all(
         self,
         subdomains: list[str],
@@ -175,12 +221,15 @@ class OutputWriter:
         Returns a mapping of label -> Path (consumed by plugins via post_output hook).
         """
         written: dict[str, Path] = {
-            "subdomains":    self.write_subdomains(subdomains),
-            "live_hosts":    self.write_live_hosts(results),
-            "login_pages":   self.write_login_pages(results),
-            "api_endpoints": self.write_api_endpoints(results),
-            "interesting":   self.write_interesting(results),
-            "results_json":  self.write_json_report(
+            "subdomains":      self.write_subdomains(subdomains),
+            "live_hosts":      self.write_live_hosts(results),
+            "login_pages":     self.write_login_pages(results),
+            "api_endpoints":   self.write_api_endpoints(results),
+            "interesting":     self.write_interesting(results),
+            "high_priority":   self.write_priority(results, settings.SCORE_HIGH),
+            "medium_priority": self.write_priority(results, settings.SCORE_MEDIUM),
+            "low_priority":    self.write_priority(results, settings.SCORE_LOW),
+            "results_json":    self.write_json_report(
                 subdomains, results, duration_seconds=duration_seconds
             ),
         }

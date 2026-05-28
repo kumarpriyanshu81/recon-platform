@@ -252,13 +252,18 @@ def _print_summary(
     print(f"  Staging environments  : {staging}")
     if high or medium or low:
         print(sep)
-        print(f"  Risk Summary:")
-        print(f"    HIGH   : {high}")
-        print(f"    MEDIUM : {medium}")
-        print(f"    LOW    : {low}")
-    if "results_json" in written:
-        print(sep)
-        print(f"  Report -> {written['results_json']}")
+        print(f"  High priority findings   : {high}")
+        print(f"  Medium priority findings : {medium}")
+        print(f"  Low priority findings    : {low}")
+    print(sep)
+    for key, label in (
+        ("high_priority",   "high_priority"),
+        ("medium_priority", "medium_priority"),
+        ("low_priority",    "low_priority"),
+        ("results_json",    "report (json)"),
+    ):
+        if key in written:
+            print(f"  {label:<18} -> {written[key]}")
     print(f"{sep}\n")
 
 

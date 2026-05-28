@@ -127,12 +127,15 @@ SCORE_LOW:    str = "LOW"
 # Output filenames
 # ---------------------------------------------------------------------------
 OUTPUT_FILES: dict[str, str] = {
-    "subdomains":    "subdomains.txt",
-    "live_hosts":    "live_hosts.txt",
-    "login_pages":   "login_pages.txt",
-    "api_endpoints": "api_endpoints.txt",
-    "interesting":   "interesting.txt",
-    "results_json":  "results.json",
+    "subdomains":      "subdomains.txt",
+    "live_hosts":      "live_hosts.txt",
+    "login_pages":     "login_pages.txt",
+    "api_endpoints":   "api_endpoints.txt",
+    "interesting":     "interesting.txt",
+    "high_priority":   "high_priority.txt",
+    "medium_priority": "medium_priority.txt",
+    "low_priority":    "low_priority.txt",
+    "results_json":    "results.json",
 }
 
 # ---------------------------------------------------------------------------
