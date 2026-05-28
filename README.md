@@ -284,7 +284,7 @@ docker run --rm \
 
 ## Screenshots
 
-> Add terminal captures to `docs/screenshots/` to populate this section.
+> Terminal captures to `docs/screenshots/` to populate this section.
 
 | Capture | Description |
 |---|---|
