@@ -1,11 +1,12 @@
 # recon-platform
 
 ![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)
-![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Docker-lightgrey)
+![Docker](https://img.shields.io/badge/Docker-supported-2496ED?logo=docker&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-22c55e)
-![Status](https://img.shields.io/badge/Status-Active-22c55e)
-![Dependencies](https://img.shields.io/badge/Python%20deps-zero%20(stdlib%20only)-blue)
 ![Tests](https://img.shields.io/badge/Tests-pytest-orange)
+![Status](https://img.shields.io/badge/Status-Active-22c55e)
+![Dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-blue)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey)
 
 A modular reconnaissance orchestration framework for structured, repeatable external attack surface mapping.
 
@@ -17,27 +18,29 @@ recon-platform is a security engineering tool that orchestrates industry-standar
 
 This is not a collection of scripts. It is a pipeline framework with a defined data model, an event-driven plugin system, and deliberate separation between public infrastructure and private research.
 
+> **Core dependency chain:** `subfinder` → `httpx-toolkit` → Python stdlib only.
+
 ---
 
 ## Key Features
 
 | Capability | Detail |
-|---|---|
+|:---|:---|
 | Subdomain enumeration | subfinder with configurable threads and wall-clock timeout |
-| HTTP probing | httpx-toolkit: title, status code, and technology detection |
+| HTTP probing | httpx-toolkit — title, status code, and technology detection |
 | Chunked processing | Large host lists probed in configurable batches with per-chunk progress |
-| Retry pass | Non-responding hosts re-probed once with an extended timeout |
-| Graceful timeout recovery | Partial subfinder results are preserved on timeout; the pipeline continues |
-| Deduplication | URL-level deduplication across chunks and retry passes |
+| Retry pass | Non-responding hosts re-probed once with a doubled per-request timeout |
+| Graceful timeout recovery | Partial subfinder results preserved on timeout; pipeline continues |
+| Deduplication | URL-level deduplication across all chunks and retry passes |
 | Resumable scans | Enumeration state persisted after each run; `--resume` skips re-enumeration |
-| Priority scoring | HIGH / MEDIUM / LOW assigned to each finding |
+| Priority scoring | HIGH / MEDIUM / LOW assigned to every finding |
 | Auto-categorisation | Login pages, admin panels, API endpoints, staging environments, dashboards |
 | Priority output files | Dedicated per-tier files for direct operational triage |
 | Structured reporting | JSON report with full metadata, statistics, and technology distribution |
 | Plugin system | Hook-based extensions at every pipeline stage boundary |
-| Public/private separation | Private plugins are git-ignored by design |
-| Zero Python dependencies | Core framework requires only the standard library |
-| Environment-variable configuration | Every default is overridable without source changes |
+| Public/private separation | Private plugins and methodology are git-ignored by design |
+| Zero runtime dependencies | Core framework requires only the Python standard library |
+| Environment-variable config | Every default overridable without source changes |
 | Docker support | Single-command containerised execution |
 
 ---
@@ -83,33 +86,31 @@ recon-platform/
 
 ## Workflow Pipeline
 
-```
-CLI arguments
-      |
-      v
-  [ENUM]   SubdomainEnumerator (subfinder)
-              - configurable timeout with partial-result recovery
-              - state saved to output/.state_<domain>.json
-              -> subdomains: list[str]
-      |
-  [PROBE]  HTTPProber (httpx-toolkit)
-              - chunked processing with per-chunk progress logging
-              - retry pass for non-responding hosts (2x timeout)
-              - URL-level deduplication across all passes
-              -> results: list[HostResult]
-      |
-  [FILTER] ResultFilter
-              - pattern-based categorisation (login, admin, api, staging, dashboard)
-              - priority scoring: HIGH / MEDIUM / LOW
-              -> results with flags and scores set
-      |
-  [OUTPUT] OutputWriter
-              - subdomains.txt, live_hosts.txt, interesting.txt
-              - high_priority.txt, medium_priority.txt, low_priority.txt
-              - results.json (canonical structured report)
+```mermaid
+flowchart TD
+    CLI([main.py — CLI & Orchestrator])
 
-  Plugin hooks fire at each stage boundary (pre_enum, post_enum,
-  pre_probe, post_probe, post_filter, post_output)
+    CLI --> ENUM["[ENUM] — SubdomainEnumerator
+subfinder · configurable timeout · partial-result recovery
+state saved → .state_domain.json"]
+
+    ENUM --> PROBE["[PROBE] — HTTPProber
+httpx-toolkit · chunked batches · retry pass · URL deduplication"]
+
+    PROBE --> FILTER["[FILTER] — ResultFilter
+pattern matching · HIGH / MEDIUM / LOW priority scoring"]
+
+    FILTER --> OUTPUT["[OUTPUT] — OutputWriter
+high/medium/low_priority.txt · interesting.txt · results.json"]
+
+    HOOKS(["Plugin Hooks
+pre_enum · post_enum · pre_probe
+post_probe · post_filter · post_output"])
+
+    HOOKS -.->|fires| ENUM
+    HOOKS -.->|fires| PROBE
+    HOOKS -.->|fires| FILTER
+    HOOKS -.->|fires| OUTPUT
 ```
 
 ---
@@ -176,7 +177,7 @@ python3 main.py -d target.com --subdomains-file ./subs.txt
 ### Custom output directory
 
 ```bash
-python3 main.py -d target.com --output-dir ./runs/2025-05-28
+python3 main.py -d target.com --output-dir ./runs/2025-06-01
 ```
 
 ### Tune probing performance
@@ -278,6 +279,18 @@ docker run --rm \
   report (json)      -> output/results.json
 --------------------------------------------------------
 ```
+
+---
+
+## Screenshots
+
+> Add terminal captures to `docs/screenshots/` to populate this section.
+
+| Capture | Description |
+|---|---|
+| `docs/screenshots/scan_summary.png` | Full scan summary with priority breakdown |
+| `docs/screenshots/probe_progress.png` | Chunked probing progress across a large host list |
+| `docs/screenshots/priority_output.png` | `high_priority.txt` example — operational triage view |
 
 ---
 
@@ -464,30 +477,43 @@ pytest tests/ -v
 
 ## Engineering Highlights
 
-**Operational resilience** — subfinder timeout does not discard work. On expiry, partial stdout is decoded and parsed; the pipeline continues with whatever was collected. The `--enum-timeout` flag gives per-run control without code changes.
+#### Operational Resilience
 
-**Chunked execution** — httpx is invoked per batch rather than against the full host list. This bounds memory usage, enables continuous progress visibility, and allows partial results to survive an interruption.
+**Graceful timeout recovery** — subfinder timeout does not discard collected work. On expiry, partial stdout is decoded and parsed; the pipeline continues with whatever was enumerated. The `--enum-timeout` flag gives per-run control without code changes.
 
-**Retry pass** — after the main probe pass, hosts that produced no response are re-probed once with a doubled per-request timeout. This recovers results from slow or rate-limited targets without rescanning the full list.
+**Chunked execution** — httpx is invoked per batch rather than against the full host list. This bounds memory usage, enables continuous progress visibility, and ensures partial results survive an interruption.
 
-**Structured data model** — every probed host is represented as a typed `HostResult` dataclass. Flags and scores are set in-place by `ResultFilter` after probing; the same objects flow through to output and plugin hooks.
+**Retry pass** — after the main probe pass, non-responding hosts are re-probed once at a doubled per-request timeout. This recovers slow or rate-limited targets without rescanning the full list.
 
-**Zero-dependency core** — the framework requires only the Python standard library at runtime. `pytest` is the only development dependency.
+#### Architecture
+
+**Typed data model** — every probed host is a `HostResult` dataclass. Category flags and priority scores are set in-place by `ResultFilter`; the same objects flow through to output writers and plugin hooks with no copying or translation.
+
+**Extensibility without coupling** — plugins register against a typed event interface. Adding or removing a plugin requires zero changes to core pipeline code.
 
 **Private module separation** — the public repository contains no detection heuristics, scoring weights, or operational methodology. All of that lives in `private_modules/`, which is git-ignored by design.
 
-**Extensibility without coupling** — plugins interact with the pipeline through a typed event interface. Adding or removing a plugin requires no changes to core code.
+#### Footprint
+
+**Zero runtime dependencies** — the framework requires only the Python standard library. `pytest` is the only development dependency.
 
 ---
 
 ## Roadmap
 
-- [ ] Parallel chunk workers (concurrent subprocess pool)
+**Intelligence & Enrichment**
 - [ ] WaybackMachine / gau historical URL enumeration stage
-- [ ] SQLite result store for cross-scan differencing and trend tracking
-- [ ] Screenshot capture integration (gowitness)
-- [ ] Nuclei template scanning as an optional post-probe stage
 - [ ] Enrichment module interface (WHOIS, ASN, certificate transparency)
+
+**Storage & Analysis**
+- [ ] SQLite result store for cross-scan differencing and trend tracking
+
+**Execution**
+- [ ] Parallel chunk workers (concurrent subprocess pool)
+
+**Integrations**
+- [ ] Screenshot capture per live host (gowitness)
+- [ ] Nuclei template scanning as an optional post-probe stage
 
 ---
 
