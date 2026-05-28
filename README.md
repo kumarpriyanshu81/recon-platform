@@ -150,13 +150,13 @@ pip install -r requirements.txt   # installs pytest only
 ### Standard scan
 
 ```bash
-python3 main.py -d hackerone.com
+python3 main.py -d example.com
 ```
 
 ### Extended enumeration timeout
 
 ```bash
-python3 main.py -d ubisoft.com --enum-timeout 600
+python3 main.py -d target.com --enum-timeout 600
 ```
 
 ### Resume after interruption
